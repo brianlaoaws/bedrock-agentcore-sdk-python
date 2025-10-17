@@ -772,7 +772,7 @@ class TestSessionManager:
             mock_client_instance.list_events.return_value = {"events": mock_events, "nextToken": None}
 
             result = manager.list_events(
-                actor_id="user-123", session_id="session-456", branch_name="test-branch", include_parent_events=True
+                actor_id="user-123", session_id="session-456", branch_name="test-branch", include_parent_branches=True
             )
 
             assert len(result) == 1
@@ -942,7 +942,7 @@ class TestSessionManager:
             with patch.object(manager, "list_events", return_value=mock_events):
                 result = manager.get_last_k_turns(
                     actor_id="user-123",
-                    sesssion_id="session-456",  # Note: typo in original method signature
+                    session_id="session-456",
                     k=2,
                 )
 
@@ -963,7 +963,7 @@ class TestSessionManager:
 
             # Mock empty list_events
             with patch.object(manager, "list_events", return_value=[]):
-                result = manager.get_last_k_turns(actor_id="user-123", sesssion_id="session-456", k=5)
+                result = manager.get_last_k_turns(actor_id="user-123", session_id="session-456", k=5)
 
                 assert result == []
 
@@ -987,7 +987,86 @@ class TestSessionManager:
                 ),
             ):
                 with pytest.raises(ClientError):
-                    manager.get_last_k_turns(actor_id="user-123", sesssion_id="session-456", k=5)
+                    manager.get_last_k_turns(actor_id="user-123", session_id="session-456", k=5)
+
+    def test_get_last_k_turns_with_include_parent_branches_parameter(self):
+        """Test get_last_k_turns with include_parent_branches parameter to cover new functionality."""
+        with patch("boto3.Session") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.region_name = "us-west-2"
+            mock_client_instance = MagicMock()
+            mock_session.client.return_value = mock_client_instance
+            mock_session_class.return_value = mock_session
+
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+
+            # Mock list_events
+            mock_events = [
+                Event(
+                    {
+                        "eventId": "event-1",
+                        "eventTimestamp": datetime(2023, 1, 1, 10, 0, 0),
+                        "payload": [
+                            {"conversational": {"role": "USER", "content": {"text": "Hello from branch"}}},
+                            {"conversational": {"role": "ASSISTANT", "content": {"text": "Hi from branch"}}},
+                        ],
+                    }
+                ),
+                Event(
+                    {
+                        "eventId": "event-2",
+                        "eventTimestamp": datetime(2023, 1, 1, 10, 5, 0),
+                        "payload": [
+                            {"conversational": {"role": "USER", "content": {"text": "Another message"}}},
+                            {"conversational": {"role": "ASSISTANT", "content": {"text": "Another response"}}},
+                        ],
+                    }
+                ),
+            ]
+            with patch.object(manager, "list_events", return_value=mock_events) as mock_list_events:
+                # Test with include_parent_branches=True
+                result = manager.get_last_k_turns(
+                    actor_id="user-123",
+                    session_id="session-456",
+                    k=3,
+                    branch_name="test-branch",
+                    include_parent_branches=True,
+                    max_results=50,
+                )
+
+                assert len(result) == 2
+                assert len(result[0]) == 2  # First turn has 2 messages
+                assert len(result[1]) == 2  # Second turn has 2 messages
+                assert all(isinstance(msg, EventMessage) for msg in result[0])
+                assert all(isinstance(msg, EventMessage) for msg in result[1])
+
+                # Verify list_events was called with include_parent_branches=True when include_parent_branches=True
+                mock_list_events.assert_called_once_with(
+                    actor_id="user-123",
+                    session_id="session-456",
+                    branch_name="test-branch",
+                    include_parent_branches=True,  # This should be True when include_parent_branches=True
+                    max_results=50,
+                )
+
+                # Test with include_parent_branches=False (default behavior)
+                mock_list_events.reset_mock()
+                manager.get_last_k_turns(
+                    actor_id="user-123",
+                    session_id="session-456",
+                    k=2,
+                    branch_name="test-branch",
+                    include_parent_branches=False,
+                )
+
+                # Verify list_events was called with include_parent_branches=False when include_parent_branches=False
+                mock_list_events.assert_called_once_with(
+                    actor_id="user-123",
+                    session_id="session-456",
+                    branch_name="test-branch",
+                    include_parent_branches=False,  # This should be False when include_parent_branches=False
+                    max_results=100,  # Default max_results
+                )
 
     def test_get_event_success(self):
         """Test get_event successful execution."""
@@ -1444,9 +1523,9 @@ class TestSession:
                 result = session.add_turns(messages=[ConversationalMessage("Hello", MessageRole.USER)])
 
                 assert result == mock_event
-                mock_add_turns.assert_called_once_with(
-                    "user-123", "session-456", [ConversationalMessage("Hello", MessageRole.USER)], None, None
-                )
+            mock_add_turns.assert_called_once_with(
+                "user-123", "session-456", [ConversationalMessage("Hello", MessageRole.USER)], None, None, None
+            )
 
     def test_session_fork_conversation_delegation(self):
         """Test MemorySession.fork_conversation delegates to manager."""
@@ -1473,6 +1552,7 @@ class TestSession:
                     "test-branch",
                     [ConversationalMessage("Fork message", MessageRole.USER)],
                     None,
+                    None,
                 )
 
     def test_session_create_blob_event_delegation(self):
@@ -1490,7 +1570,9 @@ class TestSession:
                 result = session.add_turns(messages=[BlobMessage(blob_data)])
 
                 assert result == mock_event
-                mock_add_turns.assert_called_once_with("user-123", "session-456", [BlobMessage(blob_data)], None, None)
+                mock_add_turns.assert_called_once_with(
+                    "user-123", "session-456", [BlobMessage(blob_data)], None, None, None
+                )
 
     def test_session_process_turn_with_llm_delegation(self):
         """Test MemorySession.process_turn_with_llm delegates to manager."""
@@ -1518,7 +1600,7 @@ class TestSession:
                 assert memories == mock_memories
                 assert response == mock_response
                 assert event == mock_event
-                mock_process.assert_called_once_with("user-123", "session-456", "Hello", mock_llm, None, None)
+                mock_process.assert_called_once_with("user-123", "session-456", "Hello", mock_llm, None, None, None)
 
     def test_session_get_last_k_turns_delegation(self):
         """Test MemorySession.get_last_k_turns delegates to manager."""
@@ -1534,7 +1616,8 @@ class TestSession:
                 result = session.get_last_k_turns(k=3)
 
                 assert result == mock_turns
-                mock_get_turns.assert_called_once_with("user-123", "session-456", 3, None, max_results=100)
+                # Updated to match the new method signature with include_parent_branches parameter
+                mock_get_turns.assert_called_once_with("user-123", "session-456", 3, None, None, 100)
 
     def test_session_get_event_delegation(self):
         """Test MemorySession.get_event delegates to manager."""
@@ -1662,7 +1745,8 @@ class TestSession:
                     actor_id="user-123",
                     session_id="session-456",
                     branch_name="test-branch",
-                    include_parent_events=False,
+                    include_parent_branches=False,
+                    eventMetadata=None,
                     include_payload=True,
                     max_results=100,
                 )
@@ -1836,7 +1920,7 @@ class TestEdgeCases:
                 )
             ]
             with patch.object(manager, "list_events", return_value=mock_events):
-                result = manager.get_last_k_turns(actor_id="user-123", sesssion_id="session-456", k=5)
+                result = manager.get_last_k_turns(actor_id="user-123", session_id="session-456", k=5)
 
                 # Should group into 2 turns
                 assert len(result) == 2
@@ -1868,6 +1952,7 @@ class TestEdgeCases:
                     "session-456",
                     [ConversationalMessage("Hello", MessageRole.USER)],
                     branch,
+                    None,
                     custom_timestamp,
                 )
 
@@ -2027,7 +2112,7 @@ class TestEdgeCases:
                 )
             ]
             with patch.object(manager, "list_events", return_value=mock_events):
-                result = manager.get_last_k_turns(actor_id="user-123", sesssion_id="session-456", k=5)
+                result = manager.get_last_k_turns(actor_id="user-123", session_id="session-456", k=5)
 
                 assert len(result) == 0  # No turns due to no conversational messages
 
@@ -2053,7 +2138,7 @@ class TestEdgeCases:
                 )
 
             with patch.object(manager, "list_events", return_value=mock_events):
-                result = manager.get_last_k_turns(actor_id="user-123", sesssion_id="session-456", k=3)
+                result = manager.get_last_k_turns(actor_id="user-123", session_id="session-456", k=3)
 
                 # Should only return 3 turns even though there are 10 events
                 assert len(result) == 3
@@ -2116,7 +2201,314 @@ class TestEdgeCases:
                     "session-456",
                     [ConversationalMessage("Hello", MessageRole.USER)],
                     branch,
+                    None,
                     custom_timestamp,
+                )
+
+
+class TestEventMetadataFlow:
+    """Test cases for metadata support for STM in MemorySessionManager."""
+
+    def test_fork_conversation_with_metadata_parameter(self):
+        """Test fork_conversation with new metadata parameter."""
+        with patch("boto3.Session") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.region_name = "us-west-2"
+            mock_client_instance = MagicMock()
+            mock_session.client.return_value = mock_client_instance
+            mock_session_class.return_value = mock_session
+
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+
+            # Mock add_turns
+            mock_event = {"eventId": "fork-event-123", "memoryId": "testMemory-1234567890"}
+            with patch.object(manager, "add_turns", return_value=Event(mock_event)) as mock_add_turns:
+                metadata = {"location": {"stringValue": "NYC"}}
+
+                result = manager.fork_conversation(
+                    actor_id="user-123",
+                    session_id="session-456",
+                    root_event_id="event-root-123",
+                    branch_name="test-branch",
+                    messages=[ConversationalMessage("Fork message", MessageRole.USER)],
+                    metadata=metadata,
+                )
+
+                assert result["eventId"] == "fork-event-123"
+
+                # Verify add_turns was called with metadata
+                mock_add_turns.assert_called_once()
+                call_args = mock_add_turns.call_args[1]
+                assert call_args["metadata"] == metadata
+                assert call_args["branch"]["rootEventId"] == "event-root-123"
+                assert call_args["branch"]["name"] == "test-branch"
+
+    def test_list_events_with_event_metadata_filter(self):
+        """Test list_events with eventMetadata filter parameter."""
+        with patch("boto3.Session") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.region_name = "us-west-2"
+            mock_client_instance = MagicMock()
+            mock_session.client.return_value = mock_client_instance
+            mock_session_class.return_value = mock_session
+
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+
+            # Mock response
+            mock_events = [{"eventId": "filtered-event-1", "eventTimestamp": datetime.now()}]
+            mock_client_instance.list_events.return_value = {"events": mock_events, "nextToken": None}
+
+            # Test with eventMetadata filter
+            event_metadata_filter = [
+                {
+                    "left": {"metadataKey": "location"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": "NYC"}},
+                }
+            ]
+
+            result = manager.list_events(
+                actor_id="user-123", session_id="session-456", eventMetadata=event_metadata_filter
+            )
+
+            assert len(result) == 1
+            assert result[0]["eventId"] == "filtered-event-1"
+
+            # Verify filter was applied
+            call_args = mock_client_instance.list_events.call_args[1]
+            assert "filter" in call_args
+            assert call_args["filter"]["eventMetadata"] == event_metadata_filter
+
+    def test_list_events_with_both_branch_and_metadata_filters(self):
+        """Test list_events with both branch and eventMetadata filters."""
+        with patch("boto3.Session") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.region_name = "us-west-2"
+            mock_client_instance = MagicMock()
+            mock_session.client.return_value = mock_client_instance
+            mock_session_class.return_value = mock_session
+
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+
+            # Mock response
+            mock_events = [{"eventId": "filtered-event-1", "eventTimestamp": datetime.now()}]
+            mock_client_instance.list_events.return_value = {"events": mock_events, "nextToken": None}
+
+            # Test with both branch and eventMetadata filters
+            event_metadata_filter = [
+                {
+                    "left": {"metadataKey": "location"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": "NYC"}},
+                }
+            ]
+
+            result = manager.list_events(
+                actor_id="user-123",
+                session_id="session-456",
+                branch_name="test-branch",
+                include_parent_branches=True,
+                eventMetadata=event_metadata_filter,
+            )
+
+            assert len(result) == 1
+
+            # Verify both filters were applied - eventMetadata should override branch filter
+            call_args = mock_client_instance.list_events.call_args[1]
+            assert "filter" in call_args
+            assert call_args["filter"]["eventMetadata"] == event_metadata_filter
+            # Branch filter should not be present when eventMetadata is specified
+            assert "branch" not in call_args["filter"]
+
+    def test_memory_session_list_events_with_event_metadata(self):
+        """Test MemorySession.list_events with eventMetadata parameter."""
+        with patch("boto3.Session"):
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+            session = MemorySession(
+                memory_id="testMemory-1234567890", actor_id="user-123", session_id="session-456", manager=manager
+            )
+
+            # Mock manager method
+            mock_events = [Event({"eventId": "event-1"})]
+            event_metadata_filter = [
+                {
+                    "left": {"metadataKey": "location"},
+                    "operator": "EQUALS_TO",
+                    "right": {"metadataValue": {"stringValue": "NYC"}},
+                }
+            ]
+
+            with patch.object(manager, "list_events", return_value=mock_events) as mock_list_events:
+                result = session.list_events(branch_name="test-branch", eventMetadata=event_metadata_filter)
+
+                assert result == mock_events
+                mock_list_events.assert_called_once_with(
+                    actor_id="user-123",
+                    session_id="session-456",
+                    branch_name="test-branch",
+                    include_parent_branches=False,
+                    eventMetadata=event_metadata_filter,
+                    include_payload=True,
+                    max_results=100,
+                )
+
+    def test_memory_session_fork_conversation_with_metadata(self):
+        """Test MemorySession.fork_conversation with metadata parameter."""
+        with patch("boto3.Session"):
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+            session = MemorySession(
+                memory_id="testMemory-1234567890", actor_id="user-123", session_id="session-456", manager=manager
+            )
+
+            # Mock manager method
+            mock_event = Event({"eventId": "fork-event-123"})
+            metadata = {"location": {"stringValue": "NYC"}}
+
+            with patch.object(manager, "fork_conversation", return_value=mock_event) as mock_fork:
+                result = session.fork_conversation(
+                    messages=[ConversationalMessage("Fork message", MessageRole.USER)],
+                    root_event_id="event-root-123",
+                    branch_name="test-branch",
+                    metadata=metadata,
+                )
+
+                assert result == mock_event
+                mock_fork.assert_called_once_with(
+                    "user-123",
+                    "session-456",
+                    "event-root-123",
+                    "test-branch",
+                    [ConversationalMessage("Fork message", MessageRole.USER)],
+                    metadata,
+                    None,
+                )
+
+    def test_memory_session_process_turn_with_llm_with_metadata(self):
+        """Test MemorySession.process_turn_with_llm with metadata parameter."""
+        with patch("boto3.Session"):
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+            session = MemorySession(
+                memory_id="testMemory-1234567890", actor_id="user-123", session_id="session-456", manager=manager
+            )
+
+            # Mock manager method
+            mock_memories = [{"content": {"text": "Memory"}}]
+            mock_response = "LLM response"
+            mock_event = {"eventId": "event-123"}
+            metadata = {"location": {"stringValue": "NYC"}}
+
+            with patch.object(
+                manager, "process_turn_with_llm", return_value=(mock_memories, mock_response, mock_event)
+            ) as mock_process:
+
+                def mock_llm(user_input: str, memories: List[Dict[str, Any]]) -> str:
+                    return "Response"
+
+                memories, response, event = session.process_turn_with_llm(
+                    user_input="Hello", llm_callback=mock_llm, retrieval_config=None, metadata=metadata
+                )
+
+                assert memories == mock_memories
+                assert response == mock_response
+                assert event == mock_event
+                mock_process.assert_called_once_with("user-123", "session-456", "Hello", mock_llm, None, metadata, None)
+
+    def test_process_turn_with_llm_with_metadata_parameter(self):
+        """Test process_turn_with_llm with metadata parameter."""
+        with patch("boto3.Session") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.region_name = "us-west-2"
+            mock_client_instance = MagicMock()
+            mock_session.client.return_value = mock_client_instance
+            mock_session_class.return_value = mock_session
+
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+
+            # Mock search_long_term_memories
+            mock_memories = [{"content": {"text": "Previous context"}, "memoryRecordId": "rec-123"}]
+            with patch.object(manager, "search_long_term_memories", return_value=mock_memories):
+                # Mock add_turns
+                mock_event = {"eventId": "event-123", "memoryId": "testMemory-1234567890"}
+                with patch.object(manager, "add_turns", return_value=Event(mock_event)) as mock_add_turns:
+                    # Define LLM callback
+                    def mock_llm_callback(user_input: str, memories: List[Dict[str, Any]]) -> str:
+                        return f"Response to: {user_input} with {len(memories)} memories"
+
+                    # Test process_turn_with_llm with metadata
+                    retrieval_config = {"test/namespace": RetrievalConfig(top_k=5)}
+                    metadata = {"location": {"stringValue": "NYC"}}
+
+                    memories, response, event = manager.process_turn_with_llm(
+                        actor_id="user-123",
+                        session_id="session-456",
+                        user_input="Hello",
+                        llm_callback=mock_llm_callback,
+                        retrieval_config=retrieval_config,
+                        metadata=metadata,
+                    )
+
+                    assert len(memories) == 1
+                    assert "Response to: Hello with 1 memories" in response
+                    assert event["eventId"] == "event-123"
+
+                    # Verify add_turns was called with metadata
+                    mock_add_turns.assert_called_once()
+                    call_args = mock_add_turns.call_args[1]
+                    assert call_args["metadata"] == metadata
+
+    def test_add_turns_with_metadata_parameter(self):
+        """Test add_turns with metadata parameter."""
+        with patch("boto3.Session") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.region_name = "us-west-2"
+            mock_client_instance = MagicMock()
+            mock_session.client.return_value = mock_client_instance
+            mock_session_class.return_value = mock_session
+
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+
+            # Mock create_event response
+            mock_response = {"event": {"eventId": "turn-event-123", "memoryId": "testMemory-1234567890"}}
+            mock_client_instance.create_event.return_value = mock_response
+
+            messages = [
+                ConversationalMessage("Hello", MessageRole.USER),
+                ConversationalMessage("Hi there", MessageRole.ASSISTANT),
+            ]
+            metadata = {"location": {"stringValue": "NYC"}}
+
+            result = manager.add_turns(
+                actor_id="user-123", session_id="session-456", messages=messages, metadata=metadata
+            )
+
+            assert isinstance(result, Event)
+            assert result["eventId"] == "turn-event-123"
+
+            # Verify metadata was passed to create_event
+            call_args = mock_client_instance.create_event.call_args[1]
+            assert call_args["metadata"] == metadata
+            assert len(call_args["payload"]) == 2
+
+    def test_memory_session_add_turns_with_metadata(self):
+        """Test MemorySession.add_turns with metadata parameter."""
+        with patch("boto3.Session"):
+            manager = MemorySessionManager(memory_id="testMemory-1234567890", region_name="us-west-2")
+            session = MemorySession(
+                memory_id="testMemory-1234567890", actor_id="user-123", session_id="session-456", manager=manager
+            )
+
+            # Mock manager method
+            mock_event = Event({"eventId": "event-123"})
+            metadata = {"location": {"stringValue": "NYC"}}
+
+            with patch.object(manager, "add_turns", return_value=mock_event) as mock_add_turns:
+                result = session.add_turns(
+                    messages=[ConversationalMessage("Hello", MessageRole.USER)], metadata=metadata
+                )
+
+                assert result == mock_event
+                mock_add_turns.assert_called_once_with(
+                    "user-123", "session-456", [ConversationalMessage("Hello", MessageRole.USER)], None, metadata, None
                 )
 
 
@@ -2228,7 +2620,7 @@ class TestAdditionalCoverage:
             assert second_call_args["nextToken"] == "token-123"
 
     def test_validate_and_resolve_region_no_session_region(self):
-        """Test _validate_and_resolve_region when session has no region - covers line 158."""
+        """Test _validate_and_resolve_region when session has no region - covers line 154."""
         with patch("boto3.Session") as mock_session_class:
             mock_session = MagicMock()
             mock_session.region_name = None  # No region in session
@@ -2491,8 +2883,10 @@ class TestAdditionalCoverage:
                 # Call with all parameters to test the exact order
                 session.add_turns(messages=messages, branch=branch, event_timestamp=custom_timestamp)
 
-                # Verify the exact parameter order: actor_id, session_id, messages, event_timestamp, branch
-                mock_add_turns.assert_called_once_with("user-123", "session-456", messages, custom_timestamp, branch)
+                # Verify the exact parameter order: actor_id, session_id, messages, branch, event_timestamp
+                mock_add_turns.assert_called_once_with(
+                    "user-123", "session-456", messages, branch, None, custom_timestamp
+                )
 
     def test_process_turn_with_llm_no_relevance_score_config(self):
         """Test process_turn_with_llm when RetrievalConfig has no relevance_score."""
@@ -2530,7 +2924,7 @@ class TestAdditionalCoverage:
                     assert response == "Response"
 
     def test_validate_and_resolve_region_edge_case(self):
-        """Test _validate_and_resolve_region edge case - covers line 158."""
+        """Test _validate_and_resolve_region edge case - covers line 154."""
         with patch("boto3.Session") as mock_session_class:
             mock_session = MagicMock()
             mock_session.region_name = None  # No region in session
@@ -2559,8 +2953,8 @@ class TestAdditionalCoverage:
                 # Call with branch parameter only (no timestamp)
                 session.add_turns(messages=messages, branch=branch)
 
-                # Verify the exact parameter order: actor_id, session_id, messages, event_timestamp, branch
-                mock_add_turns.assert_called_once_with("user-123", "session-456", messages, None, branch)
+                # Verify the exact parameter order: actor_id, session_id, messages, branch, event_timestamp
+                mock_add_turns.assert_called_once_with("user-123", "session-456", messages, branch, None, None)
 
     def test_list_long_term_memory_records_memoryRecordSummaries_fallback(self):
         """Test list_long_term_memory_records fallback to memoryRecordSummaries."""
@@ -2605,6 +2999,76 @@ class TestAdditionalCoverage:
             # Should not raise ValueError when session region is not a string
             manager = MemorySessionManager(memory_id="test-memory", region_name="us-west-1")
             assert manager.region_name == "us-west-1"
+
+    def test_region_validation_order_change(self):
+        """Test that region validation happens before session creation - covers recent commit changes."""
+        # Test case: Conflicting regions should raise ValueError
+        custom_session = MagicMock()
+        custom_session.region_name = "us-east-1"
+        mock_client_instance = MagicMock()
+        custom_session.client.return_value = mock_client_instance
+
+        with pytest.raises(ValueError) as exc_info:
+            MemorySessionManager(
+                memory_id="test-memory",
+                region_name="us-west-1",  # Different from session region
+                boto3_session=custom_session,
+            )
+
+        assert "Region mismatch" in str(exc_info.value)
+        assert "us-west-1" in str(exc_info.value)
+        assert "us-east-1" in str(exc_info.value)
+
+    def test_region_validation_with_none_session(self):
+        """Test region validation when boto3_session is None - covers recent commit changes."""
+        with patch("boto3.Session") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.region_name = "us-east-1"
+            mock_client_instance = MagicMock()
+            mock_session.client.return_value = mock_client_instance
+            mock_session_class.return_value = mock_session
+
+            # Test validation when boto3_session parameter is None
+            manager = MemorySessionManager(
+                memory_id="test-memory",
+                region_name="us-west-1",
+                boto3_session=None,  # Explicitly None
+            )
+
+            # Should use the provided region_name
+            assert manager.region_name == "us-west-1"
+
+    def test_region_validation_simplified_logic(self):
+        """Test the simplified region validation logic - covers recent commit changes."""
+        # Test case 1: Conflicting regions should raise ValueError
+        custom_session = MagicMock()
+        custom_session.region_name = "us-east-1"
+        mock_client_instance = MagicMock()
+        custom_session.client.return_value = mock_client_instance
+
+        with pytest.raises(ValueError) as exc_info:
+            MemorySessionManager(
+                memory_id="test-memory",
+                region_name="us-west-1",  # Different from session region
+                boto3_session=custom_session,
+            )
+
+        assert "Region mismatch" in str(exc_info.value)
+        assert "us-west-1" in str(exc_info.value)
+        assert "us-east-1" in str(exc_info.value)
+
+        # Test case 2: Matching regions should work
+        custom_session2 = MagicMock()
+        custom_session2.region_name = "us-west-1"
+        custom_session2.client.return_value = mock_client_instance
+
+        manager = MemorySessionManager(
+            memory_id="test-memory",
+            region_name="us-west-1",  # Same as session region
+            boto3_session=custom_session2,
+        )
+
+        assert manager.region_name == "us-west-1"
 
     def test_configure_timestamp_serialization_non_datetime_value(self):
         """Test timestamp serialization with non-datetime value."""
@@ -2925,8 +3389,8 @@ class TestAddTurnsWithDataClasses:
             assert "rec-1" in record_ids
             assert "rec-4" in record_ids
 
-    def test_get_last_k_turns_with_include_branches_true(self):
-        """Test get_last_k_turns with include_branches=True - covers line 539->529."""
+    def test_get_last_k_turns_with_include_parent_branches_true(self):
+        """Test get_last_k_turns with include_parent_branches=True - covers line 539->529."""
         with patch("boto3.Session") as mock_boto_client:
             mock_client_instance = MagicMock()
             mock_boto_client.return_value = mock_client_instance
@@ -2946,20 +3410,20 @@ class TestAddTurnsWithDataClasses:
             with patch.object(manager, "list_events", return_value=mock_events) as mock_list_events:
                 result = manager.get_last_k_turns(
                     actor_id="user-123",
-                    sesssion_id="session-456",
+                    session_id="session-456",
                     k=2,
                     branch_name="test-branch",
-                    include_branches=True,  # This should trigger include_parent_events=True
+                    include_parent_branches=True,  # This should trigger include_parent_branches=True
                 )
 
                 assert len(result) == 1
 
-                # Verify list_events was called with include_parent_events=True
+                # Verify list_events was called with include_parent_branches=True
                 mock_list_events.assert_called_once_with(
                     actor_id="user-123",
                     session_id="session-456",
                     branch_name="test-branch",
-                    include_parent_events=True,  # This is the key parameter
+                    include_parent_branches=True,  # This is the key parameter
                     max_results=100,
                 )
 
